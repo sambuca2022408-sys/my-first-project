@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # My First Project
 
 A beginner-friendly Python workspace with a CLI greeting, a hydropower capacity calculator, and a simple GUI project estimator.
@@ -63,3 +64,6 @@ git push -u origin main
 ## Learning path
 
 As you grow toward AI integration and architecture roles, keep building and publishing small projects like this one. Add documentation for each project, and show how it integrates services or solves a real problem.
+=======
+# my-first-project
+>>>>>>> d4a628560cf027639d4629467173c32d5d648a3b
