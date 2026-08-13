@@ -43,7 +43,7 @@ secrets.json
 # Logs
 *.log
 =======
-*.py[codz]
+
 *$py.class
 
 # C extensions
