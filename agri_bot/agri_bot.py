@@ -24,3 +24,4 @@ while True:
         print(f"\nAgriBot: {chat_completion.choices[0].message.content}\n")
     except Exception as e:
         print(f"An error occurred: {e}\n")
+        
