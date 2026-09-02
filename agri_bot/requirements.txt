@@ -1,3 +1,9 @@
-streamlit
-groq
-python-dotenv
+fastapi==0.115.0
+uvicorn==0.30.6
+python-dotenv==1.0.1
+requests==2.32.3
+groq==0.11.0
+python-multipart==0.0.9
+pypdf==4.3.1
+langchain==0.3.0
+langchain-groq==0.2.0
