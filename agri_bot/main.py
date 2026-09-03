@@ -1,109 +1,123 @@
+import os
+import requests
+import base64
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
-import requests, os, base64, datetime
-from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance
+from qdrant_client.http.models import Distance, VectorParams
 from openai import OpenAI
 
-load_dotenv()
-
-app = FastAPI(title="AgriBot Pro Nepal - Money Machine v3.1")
-
-# ========= CONFIG =========
+# ========= ENV VARS =========
 QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "agri_bot_verify_123")
-WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
-KHALTI_SECRET = os.getenv("KHALTI_SECRET")
-COLLECTION_NAME = "agri_knowledge"
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
+KHALTI_SECRET_KEY = os.getenv("KHALTI_SECRET_KEY")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "agribot_v3_2026")
+COLLECTION_NAME = "agribot_v3_knowledge"
 
-qdrant_client = QdrantClient(url=QDRANT_URL)
+# ========= QDRANT CLOUD CONNECTION =========
+try:
+    qdrant = QdrantClient(
+        url=QDRANT_URL, 
+        api_key=QDRANT_API_KEY,
+        timeout=60
+    )
+    def init_qdrant():
+        try: 
+            qdrant.get_collection(COLLECTION_NAME)
+            print("Qdrant Collection Found ✅")
+        except: 
+            qdrant.create_collection(
+                collection_name=COLLECTION_NAME, 
+                vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
+            )
+            print("Qdrant Collection Created ✅")
+    init_qdrant()
+    QDRANT_OK = True
+    print("Qdrant Connected ✅")
+except Exception as e:
+    print("Qdrant Error:", e)
+    qdrant = None
+    QDRANT_OK = False
+
+# ========= OPENAI =========
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Simple DB. Later we use Postgres
-USER_DB = {}
+# ========= SIMPLE USER DB =========
+USER_DB = {} # {phone: {"credits": 5, "district": "Kathmandu"}}
+app = FastAPI()
 
-# ========= CORE AI =========
-def get_embedding(text: str):
-    return openai_client.embeddings.create(input=text, model="text-embedding-3-small").data[0].embedding
-
+# ========= FUNCTIONS =========
 def search_qdrant(query: str):
-    vector = get_embedding(query)
-    result = qdrant_client.query_points(collection_name=COLLECTION_NAME, query=vector, limit=3)
-    return "\n".join([hit.payload.get("text", "") for hit in result.points])
-
-def get_weather(district: str):
+    if not QDRANT_OK: 
+        return "General agri knowledge for Nepal farmers."
     try:
-        url = f"http://api.weatherapi.com/v1/forecast.json?key={WEATHER_API_KEY}&q={district},Nepal&days=3"
-        data = requests.get(url).json()
-        forecast = data['forecast']['forecastday']
-        return f"3 din ko mausham: {forecast[0]['day']['condition']['text']}, Max {forecast[0]['day']['maxtemp_c']}°C"
-    except: return ""
+        emb = openai_client.embeddings.create(input=[query], model="text-embedding-3-small").data[0].embedding
+        results = qdrant.query_points(collection_name=COLLECTION_NAME, query=emb, limit=3)
+        context = "\n".join([r.payload.get("text", "") for r in results.points])
+        return context if context else "General agri knowledge for Nepal farmers."
+    except Exception as e:
+        print("Search Error:", e)
+        return "General agri knowledge for Nepal farmers."
 
-def ai_reply(query: str, image_b64=None, context="", district=""):
-    is_nepali = any('\u0900' <= c <= '\u097F' for c in query)
-    lang = "Nepali ma, saral kisan ko bhasa ma. 3-4 line ma choto jawaf." if is_nepali else "in simple English. 3-4 lines."
+def ai_reply(query: str, context: str, district: str):
+    system_prompt = f"You are AgriBot V3 for Nepal. User from {district}. Use this context: {context}. Answer in simple Nepali + English mix for farmers. Be helpful and short."
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o-mini", 
+        messages=[
+            {"role": "system", "content": system_prompt}, 
+            {"role": "user", "content": query}
+        ], 
+        max_tokens=300
+    )
+    return resp.choices[0].message.content
 
-    weather = get_weather(district)
-    prompt = f"""You are AgriBot Pro Nepal. The #1 AI for Nepali farmers.
-    Context from Agri Books: {context}
-    Current Weather: {weather}
-    District: {district}
-    Question: {query}
-    Instruction: Answer {lang}. If relevant, end with: 'Premium: Bazaar bhav, expert call, 24/7 alert pauna Rs 99/month Khalti garnuhos'
-    """
-    if image_b64:
-        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}]}]
-        model = "gpt-4o"
-    else:
-        messages = [{"role": "user", "content": prompt}]
-        model = "gpt-4o-mini"
+def check_credits(phone: str):
+    if phone not in USER_DB: 
+        USER_DB[phone] = {"credits": 5, "district": "Kathmandu"}
+    return USER_DB[phone]["credits"] > 0
 
-    res = openai_client.chat.completions.create(model=model, messages=messages, temperature=0.2, max_tokens=300)
-    return res.choices[0].message.content
+def use_credit(phone: str):
+    if phone in USER_DB: 
+        USER_DB[phone]["credits"] -= 1
+    return USER_DB[phone]["credits"]
 
-# ========= MONETIZATION =========
-def check_credits(phone):
-    if phone not in USER_DB: USER_DB[phone] = {"credits": 5, "paid": False, "district": "Kathmandu"}
-    return USER_DB[phone]["credits"] > 0 or USER_DB[phone]["paid"]
-
-def use_credit(phone):
-    if not USER_DB[phone]["paid"]: USER_DB[phone]["credits"] -= 1
-
-def create_khalti_payment(phone):
-    url = "https://a.khalti.com/api/v2/epayment/initiate/"
+def create_khalti_payment(phone: str):
+    if not KHALTI_SECRET_KEY: 
+        return ""
     payload = {
-        "return_url": "https://agribotpro.com/success",
-        "website_url": "https://agribotpro.com",
-        "amount": 9900,
-        "purchase_order_id": f"agribot_{phone}_{int(datetime.datetime.now().timestamp())}",
-        "purchase_order_name": "AgriBot Pro Monthly",
-        "customer_info": {"name": phone, "email": "farmer@agribot.com", "phone": phone}
+        "return_url": "https://your-app.onrailway.app/", 
+        "website_url": "https://your-app.onrailway.app/", 
+        "amount": 1000, 
+        "purchase_order_id": f"agribotv3_{phone}", 
+        "purchase_order_name": "AgriBot V3 Credits 20 Questions"
     }
-    headers = {"Authorization": f"Key {KHALTI_SECRET}"}
-    r = requests.post(url, json=payload, headers=headers).json()
-    return r.get("payment_url", "Payment link error")
+    headers = {"Authorization": f"Key {KHALTI_SECRET_KEY}"}
+    r = requests.post("https://a.khalti.com/api/v2/epayment/initiate/", json=payload, headers=headers)
+    return r.json().get("payment_url", "")
 
-# ========= WHATSAPP HANDLER =========
-def send_message(to: str, text: str):
-    url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
-    requests.post(url, headers=headers, json={"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text[:4000]}})
+def send_message(phone: str, text: str):
+    url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    data = {"messaging_product": "whatsapp", "to": phone, "text": {"body": text}}
+    requests.post(url, headers=headers, json=data)
 
-def speech_to_text(media_id):
+def speech_to_text(media_id: str):
     audio_url = f"https://graph.facebook.com/v20.0/{media_id}"
-    audio = requests.get(audio_url, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}).content
-    with open("temp.ogg", "wb") as f: f.write(audio)
-    transcript = openai_client.audio.transcriptions.create(model="whisper-1", file=open("temp.ogg", "rb"), language="ne")
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    meta = requests.get(audio_url, headers=headers).json()
+    audio = requests.get(meta.get("url"), headers=headers)
+    with open("temp.ogg", "wb") as f: 
+        f.write(audio.content)
+    transcript = openai_client.audio.transcriptions.create(model="whisper-1", file=open("temp.ogg", "rb"))
     return transcript.text
 
-# ========= WEBHOOK =========
+# ========= WEBHOOK ROUTES =========
 @app.get("/webhook")
 async def verify(hub_mode=Query(None), hub_verify_token=Query(None), hub_challenge=Query(None)):
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN: 
         return PlainTextResponse(hub_challenge)
     return PlainTextResponse("Fail", 403)
 
@@ -115,44 +129,59 @@ async def receive(request: Request):
         phone = msg["from"]
         district = USER_DB.get(phone, {}).get("district", "Kathmandu")
         context = search_qdrant("general agri norms nepal")
-
+        
         if not check_credits(phone):
             pay_url = create_khalti_payment(phone)
-            send_message(phone, f"Tapai ko 5 free sawal sakiyo. Premium jaari rakhna: {pay_url}")
-            return JSONResponse({"status": "payment_sent"})
-
+            if pay_url: 
+                send_message(phone, f"AgriBot V3: Tapai ko 5 free sawal sakiyo. \nPremium 20 questions: {pay_url}")
+            else: 
+                send_message(phone, "AgriBot V3: Tapai ko credits sakiyo. Admin lai contact garnu hola.")
+            return JSONResponse({"status": "no_credit"})
+            
         if msg["type"] == "text":
             query = msg["text"]["body"]
-            if "district" in query.lower(): USER_DB[phone]["district"] = query.split()[-1]
-            reply = ai_reply(query, context=context, district=district)
-
+            if "district" in query.lower(): 
+                USER_DB[phone]["district"] = query.split()[-1]
+            reply = ai_reply(query, context, district)
+            use_credit(phone)
+            
         elif msg["type"] == "audio":
             query = speech_to_text(msg["audio"]["id"])
-            reply = "Tapai le bhanu bhayo: " + query + "\n\n" + ai_reply(query, context=context, district=district)
-
+            reply = "Tapai le bhanu bhayo: " + query + "\n\n" + ai_reply(query, context, district)
+            use_credit(phone)
+            
         elif msg["type"] == "image":
-            image_bytes = requests.get(f"https://graph.facebook.com/v20.0/{msg['image']['id']}", headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}).content
+            image_id = msg["image"]["id"]
+            url = f"https://graph.facebook.com/v20.0/{image_id}"
+            headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+            image_meta = requests.get(url, headers=headers).json()
+            image_bytes = requests.get(image_meta["url"], headers=headers).content
             image_b64 = base64.b64encode(image_bytes).decode()
-            caption = msg.get("image", {}).get("caption", "yo balima ke samasya cha?")
-            reply = "Photo herera bhaneko: \n" + ai_reply(caption, image_b64=image_b64, context=context, district=district)
-        else:
-            reply = "Maile yo type bujhina. Text, Voice, or Photo pathaunuhos."
-
-        use_credit(phone)
+            vision_resp = openai_client.chat.completions.create(
+                model="gpt-4o", 
+                messages=[{
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": "This is a crop image from Nepal. Diagnose disease and give solution in Nepali."}, 
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                    ]
+                }]
+            )
+            reply = vision_resp.choices[0].message.content
+            use_credit(phone)
+            
+        else: 
+            reply = "AgriBot V3: Text, Audio, Image matra pathaunu hola."
+            
         credits_left = USER_DB[phone]["credits"]
-        if credits_left < 3: reply += f"\n\n_Baki {credits_left} free sawal. Premium: Rs 99/month_"
+        if credits_left < 3: 
+            reply += f"\n\nBaki {credits_left} free sawal baaki cha"
         send_message(phone, reply)
-
-    except Exception as e:
-        print("Error:", e)
+        
+    except Exception as e: 
+        print("Webhook Error:", e)
     return JSONResponse({"status": "ok"})
 
 @app.get("/")
-def home():
-    return {"status": "AgriBot Pro Money Machine Running 🌾💰"}
-    import os
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+def home(): 
+    return {"status": "AgriBot V3 Pro Money Machine Running 💰🌾"}
