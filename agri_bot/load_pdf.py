@@ -4,7 +4,7 @@ from fastembed import TextEmbedding
 import fitz
 import uuid
 
-PDF_PATH = "Norms Book 2080_1709448574.pdf"
+PDF_PATH = "KrishiBook.pdf"
 COLLECTION_NAME = "krishi_book"
 
 client = QdrantClient(host="localhost", port=6333)
