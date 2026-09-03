@@ -3,3 +3,6 @@ uvicorn[standard]
 pydantic
 qdrant-client
 fastembed
+python-multipart
+python-dotenv
+openai
